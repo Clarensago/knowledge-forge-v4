@@ -1,0 +1,24 @@
+{
+  "llm": {
+    "model": "deepseek-chat",
+    "api_key": "YOUR_API_KEY",
+    "base_url": "https://api.deepseek.com/v1",
+    "max_retries": 3,
+    "timeout": 120
+  },
+  "llm_heavy": {
+    "model": "deepseek-chat",
+    "api_key": "YOUR_API_KEY",
+    "base_url": "https://api.deepseek.com/v1"
+  },
+  "concurrency": {
+    "stage2_workers": 3,
+    "rate_limit_rpm": 30
+  },
+  "paths": {
+    "inbox": "inbox",
+    "staging": "staging",
+    "outbox": "outbox",
+    "logs": "logs"
+  }
+}

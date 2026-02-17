@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project runtime
+logs/*.log
+progress.json
+staging/
+inbox/*
+outbox/*
+!inbox/.gitkeep
+!outbox/.gitkeep
+!staging/.gitkeep
+!logs/.gitkeep
+
+# Secrets
+.env
+*.key
+config/config.json
+
+# CodeBuddy
+.codebuddy/
