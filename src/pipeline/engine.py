@@ -76,6 +76,9 @@ class PipelineEngine:
         logger.info(f"注册阶段: {[name for name, _ in self._stages]}")
         logger.info(f"{'=' * 60}")
 
+        # 建立 Stage 间连接（增量输出）
+        self._link_stages()
+
         start_time = time.time()
 
         for stage_name, stage in self._stages:
@@ -92,6 +95,11 @@ class PipelineEngine:
 
             logger.info(f"{'─' * 40}")
             logger.info(f"执行阶段: {stage_name}")
+
+            # 通知外部当前阶段
+            if context.on_stage_enter:
+                context.on_stage_enter(stage_name)
+
             stage_start = time.time()
 
             try:
@@ -99,6 +107,10 @@ class PipelineEngine:
                 elapsed = time.time() - stage_start
                 logger.info(f"阶段完成: {stage_name} ({elapsed:.1f}s)")
             except Exception as e:
+                # 如果是 abort/stop 触发的异常，不标记为 FAILED
+                if context.check_stop():
+                    logger.info(f"阶段中止: {stage_name}（收到停止信号）")
+                    return False
                 logger.error(f"阶段失败: {stage_name} — {e}", exc_info=True)
                 book.status = ProcessingStatus.FAILED
                 self.progress.save_book(book)
@@ -110,6 +122,15 @@ class PipelineEngine:
         logger.info(f"LLM 用量: {self.llm.usage.summary()}")
         logger.info(f"{'=' * 60}")
         return True
+
+    def _link_stages(self):
+        """建立 Stage 间连接：如果同时存在 modeler 和 assembler，注入增量输出"""
+        stage_dict = {name: stage for name, stage in self._stages}
+        modeler = stage_dict.get("modeler")
+        assembler = stage_dict.get("assembler")
+        if modeler and assembler and hasattr(modeler, "set_assembler"):
+            modeler.set_assembler(assembler)
+            logger.info("已连接 modeler → assembler（增量输出模式）")
 
     def _should_skip(self, book: Book, stage_name: str) -> bool:
         """检查某阶段是否已完成"""

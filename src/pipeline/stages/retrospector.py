@@ -26,6 +26,7 @@ from ...infra.config import Config
 from ...infra.file_store import FileStore
 from ...infra.progress import ProgressManager
 from ...llm.client import LLMClient
+from ...llm.prompt_builder import PromptBuilder
 
 logger = logging.getLogger("knowledge-forge.stage3")
 
@@ -41,6 +42,7 @@ class RetrospectorStage:
         self.llm = llm_client
         self.file_store = file_store
         self.progress = progress
+        self.prompt_builder = PromptBuilder(config)
 
     def process(self, context: PipelineContext):
         book = context.book
@@ -65,6 +67,8 @@ class RetrospectorStage:
         chapters_digest = self._build_digest(unit_outputs)
 
         context.check_pause()
+        if context.check_stop():
+            return
 
         # 并行生成三个 LLM 产品 + 一个本地产品
         guide = None
@@ -72,6 +76,7 @@ class RetrospectorStage:
         path = None
 
         logger.info("生成全书级产品（导读/图谱/路径 并行）...")
+        context.notify_substep("retrospector", 1, 4, "导读/图谱/路径")
         with ThreadPoolExecutor(max_workers=3) as pool:
             f_guide = pool.submit(
                 self._generate_guide, book.name, book_mind, chapters_digest)
@@ -81,10 +86,20 @@ class RetrospectorStage:
                 self._generate_learning_path, book.name, book_mind, chapters_digest)
 
             guide = f_guide.result()
+            if context.check_stop():
+                pool.shutdown(wait=False, cancel_futures=True)
+                return
             graph = f_graph.result()
+            if context.check_stop():
+                pool.shutdown(wait=False, cancel_futures=True)
+                return
             path = f_path.result()
 
+        if context.check_stop():
+            return
+
         # 概念速查（纯本地）
+        context.notify_substep("retrospector", 4, 4, "概念速查")
         glossary = self.generate_glossary_standalone(book.name, book_mind)
 
         # 写出
@@ -152,8 +167,20 @@ class RetrospectorStage:
     def _generate_guide(
         self, book_name: str, book_mind: BookMind, chapters_digest: str,
     ) -> Optional[str]:
-        """生成全书导读"""
-        prompt = f"""请为《{book_name}》生成一份全书导读。
+        """生成全书导读（prompt 从 config/prompts/stage3_products.md 加载）"""
+        sections = self.prompt_builder._load_sections("stage3_products.md")
+        system_msg = sections.get("guide_system",
+            "你是一位知识管理专家，擅长为书籍撰写导读和索引。")
+        user_template = sections.get("guide_user", "")
+
+        if user_template and "{book_name}" in user_template:
+            prompt = user_template.format(
+                book_name=book_name,
+                synopsis=book_mind.synopsis,
+                chapters_digest=chapters_digest,
+            )
+        else:
+            prompt = f"""请为《{book_name}》生成一份全书导读。
 
 ## 全书脉络
 {book_mind.synopsis}
@@ -161,19 +188,7 @@ class RetrospectorStage:
 ## 各章核心洞察
 {chapters_digest}
 
-## 输出要求
-1. 使用 Markdown 格式
-2. 标题: # {book_name} - 全书导读
-3. 包含以下部分:
-   - **书籍概述**: 核心主题、写作背景、目标读者（200字）
-   - **核心价值**: 本书最重要的 3-5 个知识贡献
-   - **知识体系**: 全书知识结构和内在逻辑（用列表或层级展示）
-   - **阅读指南**: 不同读者的推荐阅读路径
-   - **章节索引**: 每章用 Obsidian 双链 [[章节标题]] 链接，附一句话概要
-4. 用 Obsidian 双链标注所有核心概念
-5. 全文不少于 2000 字
-
-请直接输出 Markdown 内容。"""
+请直接输出 Markdown 内容，不少于 2000 字。"""
 
         try:
             return self.llm.generate(
@@ -181,7 +196,7 @@ class RetrospectorStage:
                 temperature=0.3,
                 max_tokens=8000,
                 stream=self.config.stream,
-                system_message="你是一位知识管理专家，擅长为书籍撰写导读和索引。",
+                system_message=system_msg,
             )
         except Exception as e:
             logger.error(f"全书导读生成失败: {e}")
@@ -190,11 +205,24 @@ class RetrospectorStage:
     def _generate_knowledge_graph(
         self, book_name: str, book_mind: BookMind,
     ) -> Optional[str]:
-        """生成知识图谱"""
+        """生成知识图谱（prompt 从 config/prompts/stage3_products.md 加载）"""
         concepts_str = json.dumps(book_mind.concepts, ensure_ascii=False, indent=1)
         relations_str = json.dumps(book_mind.relations, ensure_ascii=False, indent=1)
 
-        prompt = f"""请为《{book_name}》生成一份知识图谱文档。
+        sections = self.prompt_builder._load_sections("stage3_products.md")
+        system_msg = sections.get("knowledge_graph_system",
+            "你是一位知识图谱专家，擅长用 Mermaid 语法构建概念关系图。")
+        user_template = sections.get("knowledge_graph_user", "")
+
+        if user_template and "{book_name}" in user_template:
+            prompt = user_template.format(
+                book_name=book_name,
+                concepts_str=concepts_str,
+                relations_str=relations_str,
+                synopsis=book_mind.synopsis,
+            )
+        else:
+            prompt = f"""请为《{book_name}》生成一份知识图谱文档。
 
 ## 核心概念词典
 {concepts_str}
@@ -205,14 +233,7 @@ class RetrospectorStage:
 ## 全书脉络
 {book_mind.synopsis}
 
-## 输出要求
-1. 标题: # {book_name} - 知识图谱
-2. **概念关系图**: 用 Mermaid graph 语法画出核心概念之间的关系（不超过 30 个节点）
-3. **概念分类**: 将概念按领域/层级分组
-4. **关键关系说明**: 对最重要的 5-10 组概念关系进行文字解读
-5. 所有概念用 Obsidian 双链标注
-
-请直接输出 Markdown 内容。"""
+请用 Mermaid 语法画出概念关系图，直接输出 Markdown。"""
 
         try:
             return self.llm.generate(
@@ -220,7 +241,7 @@ class RetrospectorStage:
                 temperature=0.2,
                 max_tokens=6000,
                 stream=self.config.stream,
-                system_message="你是一位知识图谱专家，擅长用 Mermaid 语法构建概念关系图。",
+                system_message=system_msg,
             )
         except Exception as e:
             logger.error(f"知识图谱生成失败: {e}")
@@ -229,7 +250,7 @@ class RetrospectorStage:
     def _generate_learning_path(
         self, book_name: str, book_mind: BookMind, chapters_digest: str,
     ) -> Optional[str]:
-        """生成学习路径"""
+        """生成学习路径（prompt 从 config/prompts/stage3_products.md 加载）"""
         chapter_info = []
         for idx, meta in sorted(book_mind.chapter_metas.items()):
             chapter_info.append(
@@ -238,22 +259,25 @@ class RetrospectorStage:
             )
         chapters_str = "\n".join(chapter_info)
 
-        prompt = f"""请为《{book_name}》生成学习路径推荐。
+        sections = self.prompt_builder._load_sections("stage3_products.md")
+        system_msg = sections.get("learning_path_system",
+            "你是一位教育设计专家，擅长设计学习路径和课程序列。")
+        user_template = sections.get("learning_path_user", "")
+
+        if user_template and "{book_name}" in user_template:
+            prompt = user_template.format(
+                book_name=book_name,
+                synopsis=book_mind.synopsis,
+                chapters_str=chapters_str,
+            )
+        else:
+            prompt = f"""请为《{book_name}》生成学习路径推荐。
 
 ## 全书脉络
 {book_mind.synopsis}
 
 ## 章节信息
 {chapters_str}
-
-## 输出要求
-1. 标题: # {book_name} - 学习路径
-2. **入门路径**: 零基础读者的推荐阅读序列（5-8 章），含理由
-3. **进阶路径**: 有基础读者的推荐阅读序列
-4. **精读路径**: 深度研究者的推荐阅读序列
-5. **速查路径**: 查阅特定主题时应该翻阅哪些章节
-6. 每条路径的章节用 Obsidian 双链标注
-7. 附上章节间的前置知识关系说明
 
 请直接输出 Markdown 内容。"""
 
@@ -263,7 +287,7 @@ class RetrospectorStage:
                 temperature=0.3,
                 max_tokens=4000,
                 stream=self.config.stream,
-                system_message="你是一位教育设计专家，擅长设计学习路径和课程序列。",
+                system_message=system_msg,
             )
         except Exception as e:
             logger.error(f"学习路径生成失败: {e}")

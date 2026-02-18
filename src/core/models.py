@@ -193,6 +193,7 @@ class ProcessingUnit:
                 ProcessingStatus.STAGE2_DONE,
                 ProcessingStatus.STAGE2_5_DONE,
                 ProcessingStatus.STAGE3_DONE,
+                ProcessingStatus.POST_PROCESSED,
                 ProcessingStatus.FAILED,
             )
             and self.retry_count < 3

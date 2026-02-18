@@ -35,6 +35,21 @@ class PipelineContext:
     # 暂停检查回调（由 Web TaskEngine 注入）
     pause_check: Optional[Callable[[], None]] = None
 
+    # 停止检查回调（可选，优先于 should_stop 静态字段）
+    stop_check: Optional[Callable[[], bool]] = None
+
+    # Stage 进入回调（通知外部当前 stage 名）
+    on_stage_enter: Optional[Callable[[str], None]] = None
+
+    # 章节级进度回调（通知外部正在处理的 unit 标题、序号/总数）
+    on_unit_start: Optional[Callable[[str, int, int], None]] = None
+
+    # unit 完成回调（通知外部一个 unit 已完成）
+    on_unit_done: Optional[Callable[[], None]] = None
+
+    # 子步骤进度回调（stage_name, step_idx, step_total, step_label）
+    on_substep: Optional[Callable[[str, int, int, str], None]] = None
+
     def check_pause(self):
         """检查是否需要暂停，供各 Stage 调用"""
         if self.pause_check:
@@ -42,4 +57,11 @@ class PipelineContext:
 
     def check_stop(self) -> bool:
         """检查是否需要停止"""
+        if self.stop_check:
+            return self.stop_check()
         return self.should_stop
+
+    def notify_substep(self, stage_name: str, step_idx: int, step_total: int, label: str = ""):
+        """通知外部子步骤进度"""
+        if self.on_substep:
+            self.on_substep(stage_name, step_idx, step_total, label)

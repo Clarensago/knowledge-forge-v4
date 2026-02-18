@@ -53,6 +53,11 @@ class AssemblerStage:
             if context.check_stop():
                 break
 
+            # 已经合并过的跳过（增量输出已处理）
+            if all(u.status in (ProcessingStatus.STAGE2_5_DONE, ProcessingStatus.STAGE3_DONE)
+                   for u in group_units):
+                continue
+
             # 检查该组是否全部完成 Stage 2
             ready = all(
                 u.status in (
@@ -66,19 +71,8 @@ class AssemblerStage:
                 logger.info(f"[{part_id}] 部分单元未完成 Stage 2，跳过")
                 continue
 
-            # 已经合并过的跳过
-            if all(u.status in (ProcessingStatus.STAGE2_5_DONE, ProcessingStatus.STAGE3_DONE)
-                   for u in group_units):
-                continue
-
-            md = self._assemble_group(book, part_id, group_units, structure)
-            if md:
-                filename = FileStore.sanitize_filename(part_id, group_units[0].title, ".md")
-                self.file_store.write_output_md(book.safe_name, filename, md)
+            if self.assemble_one_group(book, part_id, group_units, structure):
                 total_files += 1
-
-            for u in group_units:
-                u.status = ProcessingStatus.STAGE2_5_DONE
 
         # 处理不属于任何篇的独立单元（单章书等）
         standalone = [
@@ -96,6 +90,34 @@ class AssemblerStage:
         book.status = ProcessingStatus.STAGE2_5_DONE
         self.progress.save_book(book)
         logger.info(f"Stage 2.5 完成: 生成 {total_files} 个输出文件")
+
+    def assemble_one_group(
+        self,
+        book: Book,
+        group_id: str,
+        group_units: list[ProcessingUnit],
+        structure: Optional[BookStructure] = None,
+    ) -> bool:
+        """
+        合并输出单个分组到 outbox。供 ModelerStage 增量调用。
+
+        Returns:
+            是否成功输出
+        """
+        # 跳过已经输出过的 group
+        if all(u.status in (ProcessingStatus.STAGE2_5_DONE, ProcessingStatus.STAGE3_DONE)
+               for u in group_units):
+            return False
+
+        md = self._assemble_group(book, group_id, group_units, structure)
+        if md:
+            filename = FileStore.sanitize_filename(group_id, group_units[0].title, ".md")
+            self.file_store.write_output_md(book.safe_name, filename, md)
+            for u in group_units:
+                u.status = ProcessingStatus.STAGE2_5_DONE
+            logger.info(f"[增量输出] {group_id} → outbox ({len(group_units)} units)")
+            return True
+        return False
 
     def _group_by_part(
         self,

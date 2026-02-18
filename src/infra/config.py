@@ -33,16 +33,16 @@ DEFAULT_CONFIG = {
         "max_tokens": 16384,
         "min_output_length": 1500,
         "required_sections_min": 3,
-        "dual_round": True,
+        "dual_round": False,
         "stream": True,
     },
     "concurrency": {
-        "stage2_workers": 3,
+        "stage2_workers": 5,
         "rate_limit_rpm": 30,
     },
     "features": {
         "smart_skip_enabled": True,
-        "smart_skip_threshold": 0.85,
+        "smart_skip_threshold": 0.75,
         "adaptive_routing_enabled": True,
         "embedding_enabled": True,
     },
@@ -145,7 +145,7 @@ class Config:
 
     @property
     def dual_round(self) -> bool:
-        return self.get("processing.dual_round", True)
+        return self.get("processing.dual_round", False)
 
     @property
     def stream(self) -> bool:
@@ -157,7 +157,7 @@ class Config:
 
     @property
     def concurrency(self) -> int:
-        return max(1, self.get("concurrency.stage2_workers", 3))
+        return max(1, self.get("concurrency.stage2_workers", 5))
 
     # ── 功能开关 ──
 
@@ -167,7 +167,7 @@ class Config:
 
     @property
     def smart_skip_threshold(self) -> float:
-        return self.get("features.smart_skip_threshold", 0.85)
+        return self.get("features.smart_skip_threshold", 0.75)
 
     @property
     def adaptive_routing_enabled(self) -> bool:
@@ -192,10 +192,10 @@ class Config:
     @property
     def chunk_config(self) -> dict:
         return self._structure.get("chunk", {
-            "min_size": 500,
-            "max_size": 8000,
-            "preferred_size": 6000,
-            "merge_threshold": 300,
+            "min_size": 1000,
+            "max_size": 12000,
+            "preferred_size": 8000,
+            "merge_threshold": 1500,
         })
 
     @property

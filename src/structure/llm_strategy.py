@@ -41,11 +41,13 @@ class LLMStrategy:
 
     def __init__(self, llm_client, config):
         self.llm = llm_client
+        self.config = config
         toc_cfg = config.toc_parsing
         self.scan_chars = toc_cfg.get("scan_chars", 6000)
         self.max_chars = toc_cfg.get("max_chars", 4000)
         self.min_entries = toc_cfg.get("min_entries", 3)
         self.body_signal_len = toc_cfg.get("body_signal_len", 120)
+        self._prompt_cache: dict[str, str] = {}
 
     def analyze(self, text: str, metadata: dict) -> Optional[BookStructure]:
         if not self.llm:
@@ -131,8 +133,24 @@ class LLMStrategy:
         result = "\n".join(toc_lines).strip()
         return result or None
 
+    def _load_toc_prompt(self) -> str:
+        """从 config/prompts/toc_parse.md 加载 TOC 解析 prompt 模板"""
+        if "toc_parse" in self._prompt_cache:
+            return self._prompt_cache["toc_parse"]
+        path = self.config.root / "config" / "prompts" / "toc_parse.md"
+        if path.exists():
+            content = path.read_text(encoding="utf-8").strip()
+            self._prompt_cache["toc_parse"] = content
+            return content
+        self._prompt_cache["toc_parse"] = ""
+        return ""
+
     def _parse_with_llm(self, toc_text: str) -> Optional[list]:
-        prompt = f"""以下是一本书的目录区域原文：
+        template = self._load_toc_prompt()
+        if template and "{toc_text}" in template:
+            prompt = template.format(toc_text=toc_text)
+        else:
+            prompt = f"""以下是一本书的目录区域原文：
 
 ```
 {toc_text}

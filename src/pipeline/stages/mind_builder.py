@@ -22,6 +22,7 @@ from ...infra.config import Config
 from ...infra.file_store import FileStore
 from ...infra.progress import ProgressManager
 from ...llm.client import LLMClient
+from ...llm.prompt_builder import PromptBuilder
 
 logger = logging.getLogger("knowledge-forge.stage1")
 
@@ -37,6 +38,7 @@ class MindBuilderStage:
         self.llm = llm_client
         self.file_store = file_store
         self.progress = progress
+        self.prompt_builder = PromptBuilder(config)
 
     def process(self, context: PipelineContext):
         book = context.book
@@ -56,12 +58,20 @@ class MindBuilderStage:
 
         # Round 1: 全书脉络
         logger.info("Stage 1 Round 1/4: 全书脉络...")
+        context.notify_substep("mind_builder", 1, 4, "全书脉络")
         synopsis, strategy = self._round1(overview)
+
+        if context.check_stop():
+            return
 
         # Round 2: 逐章标注
         context.check_pause()
         logger.info("Stage 1 Round 2/4: 逐章标注...")
+        context.notify_substep("mind_builder", 2, 4, "逐章标注")
         chapter_metas = self._round2(synopsis, overview, units)
+
+        if context.check_stop():
+            return
 
         # Round 3+4: 概念词典 + 关联矩阵（可并行）
         context.check_pause()
@@ -71,11 +81,17 @@ class MindBuilderStage:
         relations = []
 
         logger.info("Stage 1 Round 3-4/4: 概念词典 + 关联矩阵...")
+        context.notify_substep("mind_builder", 3, 4, "概念词典+关联矩阵")
         with ThreadPoolExecutor(max_workers=2) as pool:
             f3 = pool.submit(self._round3, synopsis, metas_summary)
             f4 = pool.submit(self._round4, synopsis, metas_summary)
             concepts = f3.result() or {}
             relations = f4.result() or []
+
+        if context.check_stop():
+            return
+
+        context.notify_substep("mind_builder", 4, 4, "组装 BookMind")
 
         # 组装 BookMind
         book_mind = BookMind(
@@ -111,29 +127,29 @@ class MindBuilderStage:
         return "\n".join(lines)
 
     def _round1(self, overview: str) -> tuple[str, ProcessingStrategy]:
-        prompt = f"""你是一位全书通读专家。请阅读以下书籍的章节概览，然后：
+        sections = self.prompt_builder._load_sections("stage1_rounds.md")
+        system_msg = sections.get("round1_system",
+            "你是一位学术级文本分析专家。请严格以 JSON 格式输出。")
+        user_template = sections.get("round1_user", "")
 
-1. 撰写一段 500 字左右的「全书脉络」(synopsis)，概括全书的核心论点、结构逻辑和知识体系
+        if user_template and "{overview}" in user_template:
+            prompt = user_template.format(overview=overview)
+        else:
+            prompt = f"""你是一位全书通读专家。请阅读以下书籍的章节概览，然后：
+
+1. 撰写一段 500 字左右的「全书脉络」(synopsis)
 2. 给出处理策略建议（JSON 格式）
 
 章节概览：
 {overview}
 
-请按以下 JSON 格式输出：
-```json
-{{
-  "synopsis": "全书脉络文本...",
-  "strategy": {{
-    "temperature": 0.2,
-    "template_name": "full",
-    "special_instructions": "（如有需要补充的特殊指令）",
-    "skip_round2": false
-  }}
-}}
-```"""
+请按 JSON 格式输出：
+{{"synopsis": "...", "strategy": {{"temperature": 0.2, "template_name": "full"}}}}"""
+
         response = self.llm.generate(
             prompt=prompt, temperature=0.3, max_tokens=2000,
             stream=True, task_label="S1-R1",
+            system_message=system_msg,
         )
         data = self._parse_json(response) or {}
         synopsis = data.get("synopsis", response[:500])
@@ -146,7 +162,18 @@ class MindBuilderStage:
             f"[{u.id}] {' > '.join(u.breadcrumb)} ({u.word_count}字)"
             for u in units
         )
-        prompt = f"""基于全书脉络和章节概览，为每个章节生成元数据标注。
+        sections = self.prompt_builder._load_sections("stage1_rounds.md")
+        system_msg = sections.get("round2_system",
+            "你是一位学术级文本分析专家。请严格以 JSON 格式输出，key 为章节序号。")
+        user_template = sections.get("round2_user", "")
+
+        if user_template and "{synopsis}" in user_template:
+            prompt = user_template.format(
+                synopsis=synopsis, unit_list=unit_list,
+                overview=overview[:8000],
+            )
+        else:
+            prompt = f"""基于全书脉络和章节概览，为每个章节生成元数据标注。
 
 全书脉络：
 {synopsis}
@@ -157,22 +184,12 @@ class MindBuilderStage:
 章节概览：
 {overview[:8000]}
 
-请按以下 JSON 格式输出：
-```json
-{{
-  "01": {{
-    "theme": "主题标签",
-    "difficulty": "basic/intermediate/advanced",
-    "chapter_type": "preface/short/normal/long",
-    "summary": "100字以内摘要",
-    "key_concepts": ["概念1", "概念2"],
-    "related_chapters": ["02", "05"]
-  }}
-}}
-```"""
+请按 JSON 格式输出，key 为章节序号。"""
+
         response = self.llm.generate(
             prompt=prompt, temperature=0.2, max_tokens=8000,
             stream=True, task_label="S1-R2",
+            system_message=system_msg,
         )
         data = self._parse_json(response) or {}
         metas = {}
@@ -182,34 +199,54 @@ class MindBuilderStage:
         return metas
 
     def _round3(self, synopsis: str, metas_summary: str) -> dict[str, str]:
-        prompt = f"""基于全书脉络和章节概览，构建全书概念词典。
+        sections = self.prompt_builder._load_sections("stage1_rounds.md")
+        system_msg = sections.get("round3_system",
+            "你是一位学术级知识图谱专家。请严格以 JSON 格式输出。")
+        user_template = sections.get("round3_user", "")
+
+        if user_template and "{synopsis}" in user_template:
+            prompt = user_template.format(
+                synopsis=synopsis, metas_summary=metas_summary,
+            )
+        else:
+            prompt = f"""基于全书脉络和章节概览，构建全书概念词典。
 
 全书脉络：{synopsis}
-
 章节概览：{metas_summary}
 
-请输出一个 JSON 对象，key 为概念名，value 为 50 字以内的定义。最多 50 个条目。
-只输出 JSON。"""
+请输出 JSON 对象，key 为概念名，value 为 50 字以内的定义。最多 50 个。"""
+
         response = self.llm.generate(
             prompt=prompt, temperature=0.2, max_tokens=4000,
             stream=True, task_label="S1-R3",
+            system_message=system_msg,
         )
         return self._parse_json(response) or {}
 
     def _round4(self, synopsis: str, metas_summary: str) -> list[dict]:
-        prompt = f"""基于全书脉络和章节概览，识别章节间的关联关系。
+        sections = self.prompt_builder._load_sections("stage1_rounds.md")
+        system_msg = sections.get("round4_system",
+            "你是一位学术级知识图谱专家。请严格以 JSON 数组格式输出。")
+        user_template = sections.get("round4_user", "")
+
+        if user_template and "{synopsis}" in user_template:
+            prompt = user_template.format(
+                synopsis=synopsis, metas_summary=metas_summary,
+            )
+        else:
+            prompt = f"""基于全书脉络和章节概览，识别章节间的关联关系。
 
 全书脉络：{synopsis}
-
 章节概览：{metas_summary}
 
-请输出一个 JSON 数组，每个元素格式：
-{{"from": "01", "to": "03", "relation": "递进/因果/对比/补充", "description": "简述关联"}}
+请输出 JSON 数组，每个元素：
+{{"from": "01", "to": "03", "relation": "...", "description": "..."}}
+最多 30 条。"""
 
-只输出 JSON 数组，最多 30 条。"""
         response = self.llm.generate(
             prompt=prompt, temperature=0.3, max_tokens=4000,
             stream=True, task_label="S1-R4",
+            system_message=system_msg,
         )
         data = self._parse_json(response)
         return data if isinstance(data, list) else []

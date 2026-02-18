@@ -9,10 +9,10 @@ strategy_priority:
 
 # ── 分块参数 ──
 chunk:
-  min_size: 500       # 最小块字数，低于此值向上合并
-  max_size: 8000      # 最大块字数，超过此值二次切割
-  preferred_size: 6000 # 期望块字数
-  merge_threshold: 300 # 低于此值强制合并到相邻块
+  min_size: 1000       # 最小块字数，低于此值向上合并
+  max_size: 12000      # 最大块字数，超过此值二次切割
+  preferred_size: 8000  # 期望块字数
+  merge_threshold: 1500 # 低于此值强制合并到相邻块
 
 # ── 正则模式定义（按检测优先级排列）──
 regex_patterns:
@@ -74,3 +74,51 @@ cleaning:
   remove_page_numbers: true
   normalize_whitespace: true
   strip_headers_footers: true
+
+# ── 验证规则 ──
+validation:
+  preface:
+    min_length: 500
+    required_sections_min: 1
+    min_links: 2
+    section_markers: ["概述", "知识地图"]
+  short:
+    min_length: 800
+    required_sections_min: 2
+    min_links: 3
+    section_markers: ["核心洞察", "概念建模", "金句"]
+  normal:
+    min_length: 1500
+    required_sections_min: 3
+    min_links: 5
+    section_markers: ["核心洞察", "概念建模", "因果链", "行为准则", "金句"]
+  long:
+    min_length: 2000
+    required_sections_min: 4
+    min_links: 8
+    section_markers: ["核心洞察", "概念建模", "因果链", "行为准则", "金句"]
+
+  lazy_patterns: "以此类推|不再赘述|详见原文|此处省略|如前所述|同理可得"
+
+  # 5 维评分权重
+  scoring:
+    length_weight: 0.25
+    structure_weight: 0.35
+    format_weight: 0.15
+    links_weight: 0.15
+    quotes_weight: 0.10
+
+# ── 二次切割子模式 ──
+sub_split_patterns:
+  - '\n(第[一二三四五六七八九十百千零○〇0-9]+节\s*[^\n]+)'
+  - '\n(#{2,4}\s+[^\n]+)'
+  - '\n(\d+\.\d+[.、]?\s+[^\n]+)'
+  - '\n([（(]\d+[)）][^\n]+)'
+
+# ── 标题清洗正则 ──
+title_cleaning:
+  strip_markdown: '^#{1,4}\s+'
+  strip_page_numbers: '[\s.·…]+\d{1,4}\s*$'
+  strip_punctuation: '[，,。]'
+  pian_pattern: '^(第\s*[一二三四五六七八九十百千零○〇0-9]+\s*篇)\s*(.*)'
+  chapter_pattern: '^(第\s*[一二三四五六七八九十百千零○〇0-9]+\s*[节章卷回])\s*(.*)'

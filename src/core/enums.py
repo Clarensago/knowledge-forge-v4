@@ -31,6 +31,7 @@ class ProcessingStatus(Enum):
     STAGE2_DONE = "stage2_done"
     STAGE2_5_DONE = "stage2_5_done"
     STAGE3_DONE = "stage3_done"
+    POST_PROCESSED = "post_processed"
     FAILED = "failed"
 
 

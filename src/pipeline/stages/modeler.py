@@ -6,10 +6,14 @@ Round 2: 定向修补或全文精修
 
 复用 v3 的 chapter_modeler + chapter_refiner + chapter_router 核心逻辑，
 prompt 模板从配置加载。
+
+v4.1 改进：增量输出 — 每完成一个 group 立即触发 Assembler 合并到 outbox。
 """
 
+import threading
 import time
 import logging
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from ..context import PipelineContext
@@ -27,7 +31,7 @@ logger = logging.getLogger("knowledge-forge.stage2")
 
 
 class ModelerStage:
-    """Stage 2: 逐章双轮建模"""
+    """Stage 2: 逐章双轮建模（支持增量输出）"""
 
     name = "modeler"
 
@@ -40,6 +44,78 @@ class ModelerStage:
         self.prompt_builder = PromptBuilder(config)
         self.router = ChapterRouter(config)
 
+        # 增量输出相关
+        self._assembler = None          # 由 PipelineEngine 注入
+        self._group_map: dict[str, list[ProcessingUnit]] = {}
+        self._unit_to_group: dict[str, str] = {}
+        self._emitted_groups: set[str] = set()
+        self._emit_lock = threading.Lock()
+
+    def set_assembler(self, assembler) -> None:
+        """注入 Assembler 实例，启用增量输出"""
+        self._assembler = assembler
+
+    def _build_group_map(self, units: list[ProcessingUnit]) -> None:
+        """预计算 unit → group 映射，复用 Assembler 的分组逻辑"""
+        if self._assembler:
+            from .assembler import AssemblerStage
+            groups = self._assembler._group_by_part(
+                units, getattr(self, '_current_structure', None)
+            )
+            self._group_map = groups
+            self._unit_to_group = {}
+            for gid, gunits in groups.items():
+                for u in gunits:
+                    self._unit_to_group[u.id] = gid
+            self._emitted_groups = set()
+            logger.info(f"增量输出就绪: {len(groups)} 个分组")
+        else:
+            self._group_map = {}
+            self._unit_to_group = {}
+
+    def _check_and_emit_group(self, unit: ProcessingUnit, book) -> None:
+        """检查 unit 所属分组是否就绪，如果是则触发增量输出"""
+        if not self._assembler or not self._group_map:
+            return
+
+        group_id = self._unit_to_group.get(unit.id)
+        if not group_id:
+            return
+
+        with self._emit_lock:
+            if group_id in self._emitted_groups:
+                return
+
+            group_units = self._group_map.get(group_id, [])
+            if not group_units:
+                return
+
+            # 检查分组内所有 unit 是否都已完成（STAGE2_DONE 或更高）
+            ready = all(
+                u.status in (
+                    ProcessingStatus.STAGE2_DONE,
+                    ProcessingStatus.STAGE2_5_DONE,
+                    ProcessingStatus.STAGE3_DONE,
+                )
+                for u in group_units
+            )
+            if not ready:
+                return
+
+            # 触发增量输出
+            self._emitted_groups.add(group_id)
+
+        # 在锁外执行 I/O
+        try:
+            success = self._assembler.assemble_one_group(
+                book, group_id, group_units,
+                getattr(self, '_current_structure', None),
+            )
+            if success:
+                self.progress.save_book(book)
+        except Exception as e:
+            logger.warning(f"增量输出 [{group_id}] 失败: {e}")
+
     def process(self, context: PipelineContext):
         book = context.book
         book_mind = context.book_mind or book.book_mind
@@ -47,6 +123,12 @@ class ModelerStage:
 
         if not book_mind:
             raise RuntimeError("BookMind 未构建，无法执行 Stage 2")
+
+        # 缓存 structure 供增量输出使用
+        self._current_structure = book.structure or context.structure
+
+        # 构建分组映射（用于增量输出）
+        self._build_group_map(units)
 
         # Round 1: 初稿生成
         round1_units = [
@@ -58,7 +140,7 @@ class ModelerStage:
             logger.info(f"Stage 2 Round 1: {len(round1_units)} 个单元待处理")
             self._run_round(round1_units, book, book_mind, context, round_num=1)
 
-        # Round 2: 精修
+        # Round 2: 精修（默认关闭）
         round2_units = [
             u for u in units
             if u.status == ProcessingStatus.STAGE2_ROUND1 and u.is_processable
@@ -72,6 +154,8 @@ class ModelerStage:
             if u.status == ProcessingStatus.STAGE2_ROUND1:
                 u.round2_output = u.round1_output
                 u.status = ProcessingStatus.STAGE2_DONE
+                # 触发可能的增量输出
+                self._check_and_emit_group(u, book)
 
         book.status = ProcessingStatus.STAGE2_DONE
         self.progress.save_book(book)
@@ -90,13 +174,21 @@ class ModelerStage:
                 context.check_pause()
                 logger.info(f"Round {round_num}: [{unit.id}] "
                             f"{unit.title} ({i}/{total}) ({unit.word_count}字)")
+                if context.on_unit_start:
+                    context.on_unit_start(unit.title, i, total)
                 self._process_one(unit, book, book_mind, round_num)
+                if context.on_unit_done:
+                    context.on_unit_done()
         else:
+            submitted = 0
             with ThreadPoolExecutor(max_workers=concurrency) as pool:
                 futures = {}
                 for unit in units:
                     if context.check_stop():
                         break
+                    submitted += 1
+                    if context.on_unit_start:
+                        context.on_unit_start(unit.title, submitted, total)
                     f = pool.submit(self._process_one, unit, book, book_mind, round_num)
                     futures[f] = unit
                 for f in as_completed(futures):
@@ -105,6 +197,8 @@ class ModelerStage:
                         f.result()
                     except Exception as e:
                         logger.error(f"[{unit.id}] 处理失败: {e}")
+                    if context.on_unit_done:
+                        context.on_unit_done()
 
     def _process_one(self, unit: ProcessingUnit, book, book_mind: BookMind, round_num: int):
         """处理单个 ProcessingUnit"""
@@ -117,6 +211,14 @@ class ModelerStage:
             self._round2(unit, book, book_mind, route, max_retries)
 
         self.progress.save_book(book)
+
+        # 增量输出：如果 dual_round 关闭且 Round 1 完成，标记为 DONE 并尝试输出
+        if round_num == 1 and not self.config.dual_round and unit.status == ProcessingStatus.STAGE2_ROUND1:
+            unit.round2_output = unit.round1_output
+            unit.status = ProcessingStatus.STAGE2_DONE
+            self._check_and_emit_group(unit, book)
+        elif round_num == 2 and unit.status == ProcessingStatus.STAGE2_DONE:
+            self._check_and_emit_group(unit, book)
 
     def _round1(self, unit: ProcessingUnit, book, book_mind: BookMind,
                 route: ChapterRoute, max_retries: int):

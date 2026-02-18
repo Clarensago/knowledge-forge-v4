@@ -59,6 +59,9 @@ class PreprocessStage:
 
         logger.info(f"文本提取完成: {len(result.text)} 字")
 
+        if context.check_stop():
+            return
+
         # 2. 结构解析
         analyzer = StructureAnalyzer(self.config, self.llm)
         structure = analyzer.analyze(result.text, result)
@@ -72,11 +75,17 @@ class PreprocessStage:
         else:
             logger.warning("结构解析失败，将使用兜底分块")
 
+        if context.check_stop():
+            return
+
         # 3. 分块规划
         planner = ChunkPlanner(self.config)
         units = planner.plan(structure, result.text) if structure else planner._fallback_split(result.text)
         context.units = units
         book.units = units
+
+        if context.check_stop():
+            return
 
         # 4. 写入 staging
         for unit in units:

@@ -38,7 +38,11 @@ outbox/*
 # Secrets
 .env
 *.key
+.api_key
 config/config.json
+
+# Runtime archive
+archive/
 
 # CodeBuddy
 .codebuddy/

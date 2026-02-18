@@ -105,22 +105,59 @@ class ChunkPlanner:
         return units
 
     def _merge_small(self, items: list[dict]) -> list[dict]:
-        """合并过短节点到相邻节点"""
+        """
+        同章智能合并：相邻且属于同一 chapter 的短节点合并至不超过 max_size。
+
+        合并策略：
+        1. 当前项过短（< merge_threshold）→ 向前合并（需同章且不超 max_size）
+        2. 前一项过短（< merge_threshold）→ 吸收当前项（需同章且不超 max_size）
+        3. 都不短但同章且合并后 <= preferred_size → 也合并（减少碎片）
+        """
         if not items:
             return items
 
         merged = []
         for item in items:
             wc = len(item["text"])
-            if merged and wc < self.merge_threshold:
-                merged[-1]["text"] += "\n\n" + item["text"]
-            elif merged and len(merged[-1]["text"]) < self.merge_threshold:
-                merged[-1]["text"] += "\n\n" + item["text"]
-                merged[-1]["breadcrumb"] = item["breadcrumb"]
-                merged[-1]["node"] = item["node"]
+            if not merged:
+                merged.append(item)
+                continue
+
+            prev = merged[-1]
+            prev_wc = len(prev["text"])
+            same_chapter = self._same_chapter(prev, item)
+            combined_wc = prev_wc + wc
+
+            # 情况 1：当前项过短，向前合并（同章且不超 max_size）
+            if wc < self.merge_threshold and same_chapter and combined_wc <= self.max_size:
+                prev["text"] += "\n\n" + item["text"]
+            # 情况 2：前一项过短，吸收当前项（同章且不超 max_size）
+            elif prev_wc < self.merge_threshold and same_chapter and combined_wc <= self.max_size:
+                prev["text"] += "\n\n" + item["text"]
+                prev["breadcrumb"] = item["breadcrumb"]
+                prev["node"] = item["node"]
+            # 情况 3：都不短但同章，合并后仍在 preferred_size 内
+            elif same_chapter and combined_wc <= self.preferred_size and (wc < self.min_size or prev_wc < self.min_size):
+                prev["text"] += "\n\n" + item["text"]
+                if wc > prev_wc:
+                    prev["breadcrumb"] = item["breadcrumb"]
+                    prev["node"] = item["node"]
             else:
                 merged.append(item)
         return merged
+
+    @staticmethod
+    def _same_chapter(a: dict, b: dict) -> bool:
+        """判断两个 item 是否属于同一 chapter（breadcrumb 第二层相同）"""
+        bc_a = a.get("breadcrumb", [])
+        bc_b = b.get("breadcrumb", [])
+        # 如果 breadcrumb 长度 >= 2，比较第二层（章级）
+        if len(bc_a) >= 2 and len(bc_b) >= 2:
+            return bc_a[1] == bc_b[1]
+        # 如果 breadcrumb 只有 1 层，比较第一层
+        if len(bc_a) >= 1 and len(bc_b) >= 1:
+            return bc_a[0] == bc_b[0]
+        return False
 
     def _split_long(self, text: str, base_title: str) -> list[tuple[str, str]]:
         """
@@ -197,9 +234,9 @@ class ChunkPlanner:
 
     def _classify(self, word_count: int) -> ChapterType:
         """根据字数分类章节类型"""
-        if word_count < 500:
+        if word_count < 1000:
             return ChapterType.PREFACE
-        if word_count < 2000:
+        if word_count < 3000:
             return ChapterType.SHORT
         if word_count > 15000:
             return ChapterType.LONG

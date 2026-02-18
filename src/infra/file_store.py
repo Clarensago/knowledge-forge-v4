@@ -153,6 +153,8 @@ class FileStore:
         title = re.sub(r'^#{1,4}\s+', '', title)
         if ' > ' in title and len(title) > 30:
             title = title.rsplit(' > ', 1)[-1]
+        # 清理装饰性圆圈/项目符号（◎○●◉◆◇■□★☆►▶▷△▽▸▹※♦♢⊙⊕⊗⊞©®℗）
+        title = re.sub(r'^[◎○●◉◆◇■□★☆►▶▷△▽▸▹※♦♢⊙⊕⊗⊞©®℗]+\s*', '', title)
         title = re.sub(
             r'[\\/:*?<>|""\u201c\u201d\u2018\u2019\u300c\u300d\u300a\u300b\n\r\t]',
             '', title,
